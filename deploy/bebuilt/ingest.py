@@ -14,7 +14,7 @@ A pass:
   2. send   pending → download through Composio (Google Docs/Sheets/Slides exported to Office formats) →
             upload to RAGFlow, tag with its source, start parsing. The old copy goes first on a revision move.
   0. reconcile  our records against everything RAGFlow holds: orphans deleted, finished parses indexed,
-                failed ones retried (it runs first, so a pass starts from what is actually there).
+                failed or stalled ones retried (it runs first, so a pass starts from what is actually there).
 """
 import fcntl
 import json
@@ -32,6 +32,10 @@ DRIVE_TOOLS_VERSION = "20260915_00"  # keep in step with bebuilt-app src/lib/sto
 BATCH = 25  # files sent per pass
 MAX_BYTES = 100 * 1024 * 1024
 MAX_ATTEMPTS = 3
+# A parse whose progress has not moved in this long is stalled, not slow: a RAGFlow restart mid-embed (2026-09-18)
+# left five files RUNNING at 80% for hours with nothing working on them, and RAGFlow never retries those itself.
+STALL_SECONDS = 30 * 60
+PROGRESS_FILE = "/var/lib/bebuilt/ingest-progress.json"  # {ragflow_doc_id: {"mark", "since"}} between passes
 
 FOLDER = "application/vnd.google-apps.folder"
 SHORTCUT = "application/vnd.google-apps.shortcut"
@@ -111,6 +115,9 @@ class RAGFlow:
 
     def parse(self, doc_ids):
         self._ok(self.s.post(f"{RAGFLOW}/datasets/{self.ds}/chunks", json={"document_ids": doc_ids}, timeout=60))
+
+    def stop(self, doc_ids):
+        self._ok(self.s.delete(f"{RAGFLOW}/datasets/{self.ds}/chunks", json={"document_ids": doc_ids}, timeout=60))
 
     def all_docs(self):
         """{doc_id: doc} for everything in the dataset, or raise if the listing comes back short. A doc is
@@ -292,7 +299,7 @@ def send(db, cx, org):
 def reconcile(db, org):
     """Our records against what RAGFlow holds (D32's startup reconcile), at the start of every pass:
     RAGFlow documents nothing refers to are deleted; a record whose document is really gone is re-queued;
-    finished parses become indexed; failed ones are retried up to MAX_ATTEMPTS."""
+    finished parses become indexed; failed or stalled ones are retried up to MAX_ATTEMPTS."""
     try:
         held = rag.all_docs()
     except Exception as e:
@@ -300,6 +307,8 @@ def reconcile(db, org):
         return
     rows = db.execute("select id, name, state, ragflow_doc_id, sent_revision, source_revision from documents "
                       "where org_id = %s and ragflow_doc_id is not null", (org,)).fetchall()
+    marks, now = load_progress(), time.time()
+    running = set()
     orphans = [rf for rf in held if rf not in {r[3] for r in rows}]
     if orphans:
         rag.delete(orphans)
@@ -319,10 +328,46 @@ def reconcile(db, org):
                        ("indexed" if sent == current else "pending", sent, d.get("chunk_count"), doc_id))
         elif run in ("FAIL", "4", "CANCEL", "2"):
             # Parsing can fail for passing reasons (a timed-out embedding call, a restart); retry before giving up.
-            db.execute("update documents set state = case when attempts + 1 >= %s then 'failed' else 'pending' end, "
-                       "attempts = attempts + 1, last_error = %s, updated_at = now() where id = %s",
-                       (MAX_ATTEMPTS, (d.get("progress_msg") or "parsing failed")[-500:], doc_id))
+            retry(db, doc_id, (d.get("progress_msg") or "parsing failed")[-500:])
+        elif run in ("RUNNING", "1"):
+            # RAGFlow keeps touching a stranded doc's update_time, so only its progress shows whether work is happening.
+            mark = f"{d.get('progress')}|{len(d.get('progress_msg') or '')}"
+            seen = marks.get(rf)
+            if not seen or seen["mark"] != mark:
+                marks[rf] = {"mark": mark, "since": now}
+                running.add(rf)
+            elif now - seen["since"] >= STALL_SECONDS:
+                try:
+                    rag.stop([rf])
+                except Exception as e:  # already finished or gone: the next pass sees its real state
+                    log(f"reconcile: stopping stalled {name} failed: {e}")
+                retry(db, doc_id, f"parsing stalled: no progress for {STALL_SECONDS // 60} minutes")
+                log(f"reconcile: {name} stalled; sent back to be retried")
+            else:
+                running.add(rf)
     db.commit()
+    save_progress({rf: m for rf, m in marks.items() if rf in running})
+
+
+def retry(db, doc_id, why):
+    """Back to pending for another send (which replaces the RAGFlow copy), or failed once MAX_ATTEMPTS are spent."""
+    db.execute("update documents set state = case when attempts + 1 >= %s then 'failed' else 'pending' end, "
+               "attempts = attempts + 1, last_error = %s, updated_at = now() where id = %s", (MAX_ATTEMPTS, why, doc_id))
+
+
+def load_progress():
+    try:
+        return json.load(open(PROGRESS_FILE))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_progress(marks):
+    os.makedirs(os.path.dirname(PROGRESS_FILE), exist_ok=True)
+    tmp = PROGRESS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(marks, f)
+    os.replace(tmp, PROGRESS_FILE)
 
 
 def main():
