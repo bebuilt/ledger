@@ -87,7 +87,8 @@ def pairs(path):
             yield k.strip(), v.strip()
 want = {}
 for layer in layers:
-    want.update(pairs(layer))
+    # RAGFLOW_APP_* belong to tenant-setup.py alone; docker/.env reaches every container's environment.
+    want.update((k, v) for k, v in pairs(layer) if not k.startswith("RAGFLOW_APP_"))
 lines, seen = [], set()
 for line in open(base):
     m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", line)
@@ -132,7 +133,10 @@ else
 fi
 
 log "tenant: app user, API key and the shared dataset"
-for i in $(seq 1 60); do curl -sf -o /dev/null http://127.0.0.1:8080/ && break; sleep 5; done
+# nginx answers before the API does (a 502 behind it), so wait for the API and the admin server themselves.
+ready() { curl -sf http://127.0.0.1:8080/api/v1/system/config | grep -q '"code":0' && curl -sf -o /dev/null http://127.0.0.1:8080/api/v1/admin/ping; }
+for i in $(seq 1 60); do ready && break; sleep 5; done
+ready || die "RAGFlow's API did not come up within five minutes"
 TENANT=/etc/bebuilt/ragflow-tenant.json
 if grep -q '^RAGFLOW_APP_PASSWORD=' "$SECRETS"; then
   RF="$(docker ps -q -f label=com.docker.compose.project=$PROJECT -f label=com.docker.compose.service=ragflow-cpu)"
