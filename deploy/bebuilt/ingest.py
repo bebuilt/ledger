@@ -13,7 +13,8 @@ A pass:
             from RAGFlow. An incomplete or failed walk never removes anything.
   2. send   pending → download through Composio (Google Docs/Sheets/Slides exported to Office formats) →
             upload to RAGFlow, tag with its source, start parsing. The old copy goes first on a revision move.
-  3. check  parsing → indexed / failed, from RAGFlow's own status.
+  0. reconcile  our records against everything RAGFlow holds: orphans deleted, finished parses indexed,
+                failed ones retried (it runs first, so a pass starts from what is actually there).
 """
 import fcntl
 import json
@@ -111,15 +112,21 @@ class RAGFlow:
     def parse(self, doc_ids):
         self._ok(self.s.post(f"{RAGFLOW}/datasets/{self.ds}/chunks", json={"document_ids": doc_ids}, timeout=60))
 
-    def statuses(self, doc_ids):
-        """{doc_id: doc} for these ids. (GET .../documents/<id> downloads the file; status comes from the list.)"""
-        out = {}
-        for i in range(0, len(doc_ids), 50):
-            part = doc_ids[i:i + 50]
-            data = self._ok(self.s.get(f"{RAGFLOW}/datasets/{self.ds}/documents",
-                                       params=[("ids", x) for x in part] + [("page_size", len(part))], timeout=60))
-            docs = data.get("docs", []) if isinstance(data, dict) else data
+    def all_docs(self):
+        """{doc_id: doc} for everything in the dataset, or raise if the listing comes back short. A doc is
+        only ever treated as missing after a COMPLETE listing: a partial answer (seen while RAGFlow was
+        restarting, 2026-09-18) once sent 39 parsing files back for re-upload beside their live copies."""
+        out, page, total = {}, 1, None
+        while True:
+            data = self._ok(self.s.get(f"{RAGFLOW}/datasets/{self.ds}/documents", params={"page": page, "page_size": 100}, timeout=60))
+            docs = data.get("docs", []) if isinstance(data, dict) else (data or [])
+            total = data.get("total") if isinstance(data, dict) else None
             out.update({d["id"]: d for d in docs})
+            if len(docs) < 100:
+                break
+            page += 1
+        if total is None or len(out) != total:
+            raise RuntimeError(f"RAGFlow listed {len(out)} of {total} documents")
         return out
 
     def delete(self, doc_ids):
@@ -282,28 +289,39 @@ def send(db, cx, org):
         log(f"send: {len(started)} file(s) uploaded and parsing")
 
 
-def check(db, org):
-    rows = db.execute("select id, name, ragflow_doc_id, sent_revision, source_revision from documents where org_id = %s and state = 'parsing'", (org,)).fetchall()
+def reconcile(db, org):
+    """Our records against what RAGFlow holds (D32's startup reconcile), at the start of every pass:
+    RAGFlow documents nothing refers to are deleted; a record whose document is really gone is re-queued;
+    finished parses become indexed; failed ones are retried up to MAX_ATTEMPTS."""
     try:
-        found = rag.statuses([r[2] for r in rows])
+        held = rag.all_docs()
     except Exception as e:
-        log(f"check: {e}")
+        log(f"reconcile: skipped, {e}")
         return
-    for doc_id, name, rf, sent, current in rows:
-        s = found.get(rf)
-        if s is None:
-            db.execute("update documents set state = 'pending', ragflow_doc_id = null, last_error = 'gone from RAGFlow', updated_at = now() where id = %s", (doc_id,))
+    rows = db.execute("select id, name, state, ragflow_doc_id, sent_revision, source_revision from documents "
+                      "where org_id = %s and ragflow_doc_id is not null", (org,)).fetchall()
+    orphans = [rf for rf in held if rf not in {r[3] for r in rows}]
+    if orphans:
+        rag.delete(orphans)
+        log(f"reconcile: deleted {len(orphans)} RAGFlow document(s) no record refers to")
+    for doc_id, name, state, rf, sent, current in rows:
+        d = held.get(rf)
+        if d is None:
+            db.execute("update documents set state = 'pending', ragflow_doc_id = null, last_error = 'gone from RAGFlow', updated_at = now() "
+                       "where id = %s and state in ('parsing', 'indexed')", (doc_id,))
             continue
-        run = str(s.get("run"))
+        if state != "parsing":
+            continue
+        run = str(d.get("run"))
         if run in ("DONE", "3"):
             # Recorded against what was sent; if the file moved on meanwhile, it goes straight back to pending.
             db.execute("update documents set state = %s, indexed_revision = %s, chunk_count = %s, last_error = null, updated_at = now() where id = %s",
-                       ("indexed" if sent == current else "pending", sent, s.get("chunk_count"), doc_id))
+                       ("indexed" if sent == current else "pending", sent, d.get("chunk_count"), doc_id))
         elif run in ("FAIL", "4", "CANCEL", "2"):
-            # Parsing can fail for passing reasons (a timed-out embedding call); retry before giving up.
+            # Parsing can fail for passing reasons (a timed-out embedding call, a restart); retry before giving up.
             db.execute("update documents set state = case when attempts + 1 >= %s then 'failed' else 'pending' end, "
                        "attempts = attempts + 1, last_error = %s, updated_at = now() where id = %s",
-                       (MAX_ATTEMPTS, (s.get("progress_msg") or "parsing failed")[-500:], doc_id))
+                       (MAX_ATTEMPTS, (d.get("progress_msg") or "parsing failed")[-500:], doc_id))
     db.commit()
 
 
@@ -322,7 +340,7 @@ def main():
     org = cfg["ORG_ID"]
     t = time.time()
     with psycopg.connect(cfg["WORKER_DB_URL"], connect_timeout=20) as db:
-        check(db, org)
+        reconcile(db, org)
         plan(db, cx, org)
         send(db, cx, org)
         counts = dict(db.execute("select state, count(*) from documents where org_id = %s group by state", (org,)).fetchall())
