@@ -8,6 +8,8 @@ the only thing bebuilt adds to the fork; everything else tracks upstream.
 | `box-setup.sh` | Brings a box to its intended state. Runs as root from `/opt/ragflow` at the pinned ref. Re-runnable. |
 | `compose.bebuilt.yml` | Compose override: nothing is published to the host except nginx on `127.0.0.1:8080`, which cloudflared reaches. |
 | `env.bebuilt` | Non-secret settings layered onto `docker/.env`: the image pinned by digest, OpenSearch, local embeddings, no self-registration. |
+| `tenant-setup.py` | Runs inside the RAGFlow container: this box's app user, its API key and the `shared` dataset (embedding model pinned; never changed once the dataset exists). Writes `/etc/bebuilt/ragflow-tenant.json`. |
+| `ingest.py` + `bebuilt-ingest.{service,timer}` | The ingestion worker, every five minutes: walks the confirmed selection through Composio, sends new and changed files to RAGFlow, records progress in the platform DB as `worker_<slug>` (RLS: this org's rows only). |
 | `ragflow-dump.sh` | Nightly consistent MySQL dump onto the box's own disk (keeps three), so each Hetzner backup holds a clean copy. |
 
 It is driven from the laptop by `scripts/ragflow-provision.sh <client> <host> [ref]` in

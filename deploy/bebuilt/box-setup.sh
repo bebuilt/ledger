@@ -5,8 +5,11 @@
 # Driven from the laptop by scripts/ragflow-provision.sh in bebuilt-platform-v2, which first writes
 #   /etc/bebuilt/ragflow-secrets.env      (0600) MYSQL_PASSWORD, MINIO_PASSWORD, REDIS_PASSWORD,
 #                                          OPENSEARCH_PASSWORD, ELASTIC_PASSWORD, ADMIN_DEFAULT_PASSWORD,
-#                                          RAGFLOW_SECRET_KEY — from the client's own 1Password vault
+#                                          RAGFLOW_SECRET_KEY, RAGFLOW_APP_PASSWORD, RAGFLOW_APP_EMAIL — from the
+#                                          client's own 1Password vault
 #   /etc/bebuilt/cloudflared-token        (0600, optional) the client's tunnel token
+#   /etc/bebuilt/worker.env               (0600, optional) WORKER_DB_URL, ORG_ID, COMPOSIO_API_KEY,
+#                                          COMPOSIO_USER_ID — turns on the ingestion worker
 # and then checks out the pinned ref. This script never fetches code and never generates a secret.
 #
 # The box leaves our hands (walk-away, D36), so nothing here may be multi-tenant: no platform key, no
@@ -37,7 +40,7 @@ sshd -t && systemctl try-reload-or-restart ssh
 
 log "packages: unattended security upgrades, git, python3"
 apt-get update -qq
-apt-get install -y -qq unattended-upgrades git python3 ca-certificates curl gnupg >/dev/null
+apt-get install -y -qq unattended-upgrades git python3 python3-psycopg python3-requests ca-certificates curl gnupg >/dev/null
 
 log "kernel: vm.max_map_count for OpenSearch"
 echo 'vm.max_map_count=262144' > /etc/sysctl.d/60-opensearch.conf
@@ -126,6 +129,30 @@ if [ -f "$TOKEN" ]; then
   systemctl is-active --quiet cloudflared || die "cloudflared is not running"
 else
   log "cloudflared: skipped, no $TOKEN"
+fi
+
+log "tenant: app user, API key and the shared dataset"
+for i in $(seq 1 60); do curl -sf -o /dev/null http://127.0.0.1:8080/ && break; sleep 5; done
+TENANT=/etc/bebuilt/ragflow-tenant.json
+if grep -q '^RAGFLOW_APP_PASSWORD=' "$SECRETS"; then
+  RF="$(docker ps -q -f label=com.docker.compose.project=$PROJECT -f label=com.docker.compose.service=ragflow-cpu)"
+  ( set -a; . "$SECRETS"; set +a
+    docker exec -i -e ADMIN_DEFAULT_PASSWORD -e RAGFLOW_APP_PASSWORD -e RAGFLOW_APP_EMAIL "$RF" /ragflow/.venv/bin/python - \
+      < "$HERE/tenant-setup.py" > "$TENANT.tmp" ) || die "tenant setup failed"
+  chmod 600 "$TENANT.tmp" && mv "$TENANT.tmp" "$TENANT"
+  python3 -c "import json; d=json.load(open('$TENANT')); print('   dataset', d['dataset_id'], d['embedding_model'])"
+else
+  log "tenant: skipped, no RAGFLOW_APP_PASSWORD in $SECRETS"
+fi
+
+if [ -f /etc/bebuilt/worker.env ] && [ -f "$TENANT" ]; then
+  log "ingestion: worker on a five-minute timer"
+  [ "$(stat -c %a /etc/bebuilt/worker.env)" = 600 ] || die "/etc/bebuilt/worker.env must be mode 600"
+  install -m 0644 "$HERE/bebuilt-ingest.service" "$HERE/bebuilt-ingest.timer" /etc/systemd/system/
+  systemctl daemon-reload
+  systemctl enable --now bebuilt-ingest.timer >/dev/null 2>&1
+else
+  log "ingestion: skipped, no /etc/bebuilt/worker.env"
 fi
 
 log "backups: nightly consistent MySQL dump onto this disk"

@@ -1,0 +1,10 @@
+[Unit]
+Description=bebuilt ingestion pass (confirmed selection -> this client's RAGFlow dataset)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/ragflow/deploy/bebuilt/ingest.py
+TimeoutStartSec=50min
+Nice=5
