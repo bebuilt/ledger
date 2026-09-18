@@ -25,3 +25,22 @@ Rules this directory keeps:
 - **Nothing multi-tenant on a box.** Every credential on it belongs to that client alone.
 - **The image is pinned by digest** to a build that contains the CVE-2026-93013 fix (PR #19591); the
   released `v0.27.2` does not.
+
+## Operating a box (learned on bebuilt's box, 2026-09-18)
+
+- **Never restart RAGFlow while documents are parsing.** A restart (a settings change, `compose up`, a
+  reboot) strands every in-flight parse: RAGFlow keeps it `RUNNING` forever and never retries it. Five files
+  sat at 80% for three hours this way. Before any restart: `systemctl stop bebuilt-ingest.timer`, stop the
+  running parses (`DELETE /api/v1/datasets/<id>/chunks` with their `document_ids`), restart, then set those
+  documents back to `pending` with `attempts = 0` and start the timer. `ingest.py` (from `.10`) also re-sends
+  any parse whose progress has not moved for 30 minutes, at the cost of one of its three attempts.
+- **Embedding settings on a CPU box are load-bearing.** RAGFlow waits 30 s for each TEI call (hard-coded),
+  and a second document's OCR slows the first one's embedding past it. `env.bebuilt` pins
+  `EMBEDDING_BATCH_SIZE=2` and `MAX_CONCURRENT_TASKS=1` (from `.11`). A file failing with
+  `Read timed out. (read timeout=30)` means raise neither; look at what else was running.
+- **Settings reach a box through its tag**, like code: tag the change, then re-run
+  `scripts/ragflow-provision.sh <client> <host>` (it checks out the tag and merges `env.bebuilt` into
+  `docker/.env`). That restarts RAGFlow, so the rule above applies.
+- **Failed for good is not stuck.** After three attempts a document is `failed` and the app stops counting it
+  as work in progress; it is retried only when the file changes in the store. Re-queue it by hand
+  (`pending`, `attempts = 0`) once the cause is fixed.
