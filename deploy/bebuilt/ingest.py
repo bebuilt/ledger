@@ -227,6 +227,7 @@ def plan(db, cx, org):
                        when documents.indexed_revision is distinct from excluded.source_revision
                             and documents.state in ('indexed', 'skipped') then 'pending'
                        when documents.state = 'failed' and documents.source_revision is distinct from excluded.source_revision then 'pending'
+                       when documents.state = 'failed' and documents.attempts < 3 then 'pending'
                        else documents.state end,
                      attempts = case when documents.source_revision is distinct from excluded.source_revision then 0 else documents.attempts end,
                      last_error = case when excluded.state = 'skipped' then excluded.last_error else documents.last_error end,
@@ -299,8 +300,10 @@ def check(db, org):
             db.execute("update documents set state = %s, indexed_revision = %s, chunk_count = %s, last_error = null, updated_at = now() where id = %s",
                        ("indexed" if sent == current else "pending", sent, s.get("chunk_count"), doc_id))
         elif run in ("FAIL", "4", "CANCEL", "2"):
-            db.execute("update documents set state = 'failed', last_error = %s, updated_at = now() where id = %s",
-                       ((s.get("progress_msg") or "parsing failed")[-500:], doc_id))
+            # Parsing can fail for passing reasons (a timed-out embedding call); retry before giving up.
+            db.execute("update documents set state = case when attempts + 1 >= %s then 'failed' else 'pending' end, "
+                       "attempts = attempts + 1, last_error = %s, updated_at = now() where id = %s",
+                       (MAX_ATTEMPTS, (s.get("progress_msg") or "parsing failed")[-500:], doc_id))
     db.commit()
 
 
