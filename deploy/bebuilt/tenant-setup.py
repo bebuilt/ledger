@@ -7,7 +7,8 @@ Runs INSIDE the ragflow container (its venv has the RSA library RAGFlow's login 
 
 Reads from the environment (box-setup.sh passes them from /etc/bebuilt/ragflow-secrets.env):
     ADMIN_DEFAULT_PASSWORD, RAGFLOW_APP_PASSWORD, DEFAULT_SUPERUSER_EMAIL (default admin@ragflow.io),
-    RAGFLOW_APP_EMAIL (default ask-app@tenant.local), RAGFLOW_EMBEDDING_MODEL (default: the TEI model, Builtin)
+    RAGFLOW_APP_EMAIL (default ask-app@tenant.local), RAGFLOW_EMBEDDING_MODEL (unset: no dataset yet, since
+    the model can only be chosen once, from the client's own sample)
 Prints one JSON line: {"api_key", "dataset_id", "embedding_model", "app_user"}.
 
 The embedding model is fixed once the dataset holds content (D6), so an existing dataset is never touched:
@@ -66,7 +67,8 @@ def main():
     superuser = os.environ.get("DEFAULT_SUPERUSER_EMAIL") or "admin@ragflow.io"
     app_email = os.environ.get("RAGFLOW_APP_EMAIL") or "ask-app@tenant.local"
     app_password = env("RAGFLOW_APP_PASSWORD")
-    model = os.environ.get("RAGFLOW_EMBEDDING_MODEL") or f"{env('TEI_MODEL')}@Builtin"
+    # No model chosen yet (a new client before its sample test): make the user and key, no dataset (D6).
+    model = os.environ.get("RAGFLOW_EMBEDDING_MODEL")
 
     admin = login(ADMIN, "/api/v1/admin/login", superuser, env("ADMIN_DEFAULT_PASSWORD"))
     found, _ = call("GET", f"{ADMIN}/api/v1/admin/users/{app_email}", auth=admin)
@@ -87,6 +89,11 @@ def main():
     bearer = f"Bearer {key}"
     listed, _ = call("GET", f"{API}/api/v1/datasets?name={DATASET}", auth=bearer)
     existing = [d for d in listed.get("data") or [] if d.get("name") == DATASET]
+    if not model:
+        # No model named: never create one, but never forget one that exists either.
+        ds = existing[0] if existing else {"id": None, "embedding_model": None}
+        print(json.dumps({"api_key": key, "dataset_id": ds["id"], "embedding_model": ds.get("embedding_model"), "app_user": app_email}))
+        return
     if existing:
         ds = existing[0]
         if ds.get("embedding_model") != model:

@@ -141,22 +141,22 @@ TENANT=/etc/bebuilt/ragflow-tenant.json
 if grep -q '^RAGFLOW_APP_PASSWORD=' "$SECRETS"; then
   RF="$(docker ps -q -f label=com.docker.compose.project=$PROJECT -f label=com.docker.compose.service=ragflow-cpu)"
   ( set -a; . "$SECRETS"; set +a
-    docker exec -i -e ADMIN_DEFAULT_PASSWORD -e RAGFLOW_APP_PASSWORD -e RAGFLOW_APP_EMAIL "$RF" /ragflow/.venv/bin/python - \
+    docker exec -i -e ADMIN_DEFAULT_PASSWORD -e RAGFLOW_APP_PASSWORD -e RAGFLOW_APP_EMAIL -e RAGFLOW_EMBEDDING_MODEL "$RF" /ragflow/.venv/bin/python - \
       < "$HERE/tenant-setup.py" > "$TENANT.tmp" ) || die "tenant setup failed"
   chmod 600 "$TENANT.tmp" && mv "$TENANT.tmp" "$TENANT"
-  python3 -c "import json; d=json.load(open('$TENANT')); print('   dataset', d['dataset_id'], d['embedding_model'])"
+  python3 -c "import json; d=json.load(open('$TENANT')); print('   dataset', d['dataset_id'] or 'not yet (no embedding model chosen)', d['embedding_model'] or '')"
 else
   log "tenant: skipped, no RAGFLOW_APP_PASSWORD in $SECRETS"
 fi
 
-if [ -f /etc/bebuilt/worker.env ] && [ -f "$TENANT" ]; then
+if [ -f /etc/bebuilt/worker.env ] && [ -f "$TENANT" ] && python3 -c "import json,sys; sys.exit(0 if json.load(open('$TENANT')).get('dataset_id') else 1)"; then
   log "ingestion: worker on a five-minute timer"
   [ "$(stat -c %a /etc/bebuilt/worker.env)" = 600 ] || die "/etc/bebuilt/worker.env must be mode 600"
   install -m 0644 "$HERE/bebuilt-ingest.service" "$HERE/bebuilt-ingest.timer" /etc/systemd/system/
   systemctl daemon-reload
   systemctl enable --now bebuilt-ingest.timer >/dev/null 2>&1
 else
-  log "ingestion: skipped, no /etc/bebuilt/worker.env"
+  log "ingestion: skipped (needs /etc/bebuilt/worker.env and a dataset)"
 fi
 
 log "backups: nightly consistent MySQL dump onto this disk"
