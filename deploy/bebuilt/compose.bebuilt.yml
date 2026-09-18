@@ -1,0 +1,29 @@
+# bebuilt override for docker/docker-compose.yml. Applied by box-setup.sh as the second -f file.
+#
+# Publish nothing to the host except RAGFlow's own nginx, and that only on loopback, where cloudflared
+# reaches it. Docker writes its own iptables rules and bypasses UFW, so not publishing a port is the only
+# control that holds (Onyx lesson, cdc-deployment-runbook). Every service upstream publishes is reset
+# here, including ones outside the active profiles, so switching a profile cannot quietly open a port.
+services:
+  ragflow-cpu:
+    ports: !override
+      - "127.0.0.1:8080:80"
+  ragflow-gpu:
+    ports: !override
+      - "127.0.0.1:8080:80"
+  es01: { ports: !reset [] }
+  opensearch01: { ports: !reset [] }
+  infinity: { ports: !reset [] }
+  serenedb: { ports: !reset [] }
+  oceanbase: { ports: !reset [] }
+  seekdb: { ports: !reset [] }
+  sandbox-executor-manager: { ports: !reset [] }
+  mysql: { ports: !reset [] }
+  minio: { ports: !reset [] }
+  redis: { ports: !reset [] }
+  jaeger: { ports: !reset [] }
+  kibana: { ports: !reset [] }
+  nats: { ports: !reset [] }
+  clickhouse: { ports: !reset [] }
+  tei-cpu: { ports: !reset [] }
+  tei-gpu: { ports: !reset [] }
