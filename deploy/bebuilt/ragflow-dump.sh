@@ -6,6 +6,7 @@
 # TODO(T22): pause the ingestion worker around the dump once it exists, so the dump and the object store
 # share a point in time.
 set -euo pipefail
+umask 077
 DIR=/var/backups/ragflow
 KEEP=3
 OUT="$DIR/mysql-$(date -u +%Y%m%dT%H%MZ).sql.gz"

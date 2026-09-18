@@ -25,5 +25,10 @@ services:
   kibana: { ports: !reset [] }
   nats: { ports: !reset [] }
   clickhouse: { ports: !reset [] }
-  tei-cpu: { ports: !reset [] }
+  tei-cpu:
+    ports: !reset []
+    # TEI's default --max-batch-tokens (16384) makes the warm-up allocate one 16384² attention matrix per
+    # head: 16 GiB for Qwen3-Embedding-0.6B, the whole box. 4096 needs ~1 GiB, and RAGFlow's chunks are
+    # ~512 tokens; longer inputs are cut by --auto-truncate.
+    command: ["--model-id", "/data/${TEI_MODEL}", "--auto-truncate", "--max-batch-tokens", "4096"]
   tei-gpu: { ports: !reset [] }
