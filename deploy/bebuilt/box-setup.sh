@@ -60,9 +60,9 @@ if ! command -v docker >/dev/null; then
 fi
 # !reset / !override in compose.bebuilt.yml need Compose 2.24.4 or later.
 python3 - "$(docker compose version --short)" <<'PY' || die "docker compose $(docker compose version --short) is older than 2.24.4"
-import sys
-v = tuple(int(x) for x in sys.argv[1].lstrip("v").split("-")[0].split(".")[:3])
-sys.exit(0 if v >= (2, 24, 4) else 1)
+import re, sys
+m = re.match(r"v?(\d+)\.(\d+)\.(\d+)", sys.argv[1])  # Ubuntu's reads like 2.40.3+ds1-0ubuntu1
+sys.exit(0 if m and tuple(map(int, m.groups())) >= (2, 24, 4) else 1)
 PY
 
 log "docker: bounded logs"
