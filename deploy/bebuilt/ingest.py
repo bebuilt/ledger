@@ -111,8 +111,16 @@ class RAGFlow:
     def parse(self, doc_ids):
         self._ok(self.s.post(f"{RAGFLOW}/datasets/{self.ds}/chunks", json={"document_ids": doc_ids}, timeout=60))
 
-    def status(self, doc_id):
-        return self._ok(self.s.get(f"{RAGFLOW}/datasets/{self.ds}/documents/{doc_id}", timeout=60))
+    def statuses(self, doc_ids):
+        """{doc_id: doc} for these ids. (GET .../documents/<id> downloads the file; status comes from the list.)"""
+        out = {}
+        for i in range(0, len(doc_ids), 50):
+            part = doc_ids[i:i + 50]
+            data = self._ok(self.s.get(f"{RAGFLOW}/datasets/{self.ds}/documents",
+                                       params=[("ids", x) for x in part] + [("page_size", len(part))], timeout=60))
+            docs = data.get("docs", []) if isinstance(data, dict) else data
+            out.update({d["id"]: d for d in docs})
+        return out
 
     def delete(self, doc_ids):
         if doc_ids:
@@ -275,11 +283,15 @@ def send(db, cx, org):
 
 def check(db, org):
     rows = db.execute("select id, name, ragflow_doc_id, sent_revision, source_revision from documents where org_id = %s and state = 'parsing'", (org,)).fetchall()
+    try:
+        found = rag.statuses([r[2] for r in rows])
+    except Exception as e:
+        log(f"check: {e}")
+        return
     for doc_id, name, rf, sent, current in rows:
-        try:
-            s = rag.status(rf)
-        except Exception as e:
-            log(f"check: {name}: {e}")
+        s = found.get(rf)
+        if s is None:
+            db.execute("update documents set state = 'pending', ragflow_doc_id = null, last_error = 'gone from RAGFlow', updated_at = now() where id = %s", (doc_id,))
             continue
         run = str(s.get("run"))
         if run in ("DONE", "3"):
